@@ -7,16 +7,15 @@ from std_srvs.srv import Empty
 import numpy as np
 from typing import Tuple
 import math
-import time
 import cv2
 import os
-
 
 class TurtleBot3Env(Node):
     """ROS2 Environment wrapper adapted for Stage Simulator + Odom Wrapper"""
 
     def __init__(self):
         super().__init__('turtlebot3_env')
+        # Map configuration for obstacle checking
         self.map_path = '/home/danny/project_rmov/src/stage_ros2/world/bitmaps/solid_cave.png'
         
         # Load as grayscale (0=Black/Obstacle, 255=White/Free)
@@ -24,37 +23,27 @@ class TurtleBot3Env(Node):
         
         if self.map_img is None:
             self.get_logger().error(f"COULD NOT LOAD MAP FROM: {self.map_path}")
-            # Fallback size if map fails to load (800x800 is standard for Stage)
             self.img_height, self.img_width = 800, 800 
         else:
             self.map_img = np.flipud(self.map_img)
-
             self.img_height, self.img_width = self.map_img.shape
             self.get_logger().info(f"Map loaded successfully: {self.img_width}x{self.img_height}")
 
-        # Map physical size in meters (from your .world file)
+        # Map physical size in meters
         self.map_size_meters = 16.0 
-        # Resolution (Pixels per Meter)
         self.resolution = self.img_width / self.map_size_meters
 
         self.spawn_x = -7.0
         self.spawn_y = -7.0
         
-
-        # --- Publishers ---
+        # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 100)
         
-        # --- Subscribers ---
-        # 1. Use /base_scan for Stage
-        self.scan_sub = self.create_subscription(LaserScan, '/base_scan',
-                                                  self.scan_callback, 100)
-        
-        # 2. CRITICAL CHANGE: Listen to the WRAPPER'S topic, not the simulator directly
-        self.odom_sub = self.create_subscription(Odometry, '/odom/sim',
-                                                  self.odom_callback, 100)
+        # Subscribers
+        self.scan_sub = self.create_subscription(LaserScan, '/base_scan', self.scan_callback, 100)
+        self.odom_sub = self.create_subscription(Odometry, '/odom/sim', self.odom_callback, 100)
 
-        # --- Services ---
-        # 3. CRITICAL CHANGE: Call the WRAPPER'S service to reset everything
+        # Services
         self.reset_stage_client = self.create_client(Empty, '/reset_sim')
 
         # State variables
@@ -62,30 +51,25 @@ class TurtleBot3Env(Node):
         self.position = (0.0, 0.0)
         self.yaw = 0.0
         self.last_position = (0.0, 0.0)
-
-        # Goal position (will be randomized)
         self.goal_position = (4.0, 4.0)
+        self.goal_reached_flag = False
 
         # Action space: 5 discrete actions
         self.actions = {
             0: (0.15, 0.0),    # Forward
-            1: (0.0, 0.25),     # Rotate left
-            2: (0.0, -0.25),    # Rotate right
-            3: (0.08, 0.03),    # Forward + left
-            4: (0.08, -0.03),   # Forward + right
+            1: (0.0, 0.25),    # Rotate left
+            2: (0.0, -0.25),   # Rotate right
+            3: (0.08, 0.03),   # Forward + left
+            4: (0.08, -0.03),  # Forward + right
         }
 
         self.collision_threshold = 0.2
         self.goal_threshold = 0.3
 
-        self.goal_reached_flag = False
-
     def scan_callback(self, msg: LaserScan):
-        """Store latest LiDAR scan"""
         self.scan_data = list(msg.ranges)
 
     def odom_callback(self, msg: Odometry):
-        """Store latest odometry data (Already corrected by wrapper)"""
         self.position = (
             msg.pose.pose.position.x,
             msg.pose.pose.position.y
@@ -118,18 +102,16 @@ class TurtleBot3Env(Node):
             reward = -100.0
             done = True
             self.get_logger().info("Collision detected!")
-        # CRITICAL: Check both flag AND direct distance measurement
         elif self.goal_reached_flag or self.distance_to_goal() < self.goal_threshold:
             reward = 200.0
             done = True
             self.send_velocity(0.0, 0.0)
-            self.goal_reached_flag = True  # Set it if distance check triggered
+            self.goal_reached_flag = True 
             self.get_logger().info("Goal reached!")
         else:
             reward = self.compute_reward(action)
         
         return self.get_state(), reward, done
-
 
     def compute_reward(self, action: int) -> float:
         current_dist = self.distance_to_goal()
@@ -157,7 +139,6 @@ class TurtleBot3Env(Node):
             obstacle_penalty = 0.0
 
         action_penalty = -0.01 if action in [1, 2] else 0.0
-        
         time_penalty = -0.25
 
         return progress_reward + obstacle_penalty + time_penalty + action_penalty
@@ -189,39 +170,29 @@ class TurtleBot3Env(Node):
 
     def is_valid_point(self, x: float, y: float) -> bool:
         """
-        Check if a coordinate (meters) is in free space (White pixel).
-        Stage Map Coordinates: Center is (0,0).
-        Image Coordinates: Top-Left is (0,0).
+        Check if a coordinate (meters) is in free space.
+        Transforms World Coordinates to Image Coordinates.
         """
         if self.map_img is None:
-            return True # Fallback if map didn't load
+            return True 
 
-        # 1. Convert World (Meters) to Image (Pixels)
-        # Shift origin from center (0,0) to top-left corner
-        # X: -8 to +8  -> 0 to Width
-        # Y: -8 to +8  -> Height to 0 (Image Y is inverted relative to World Y)
-        
+        # Transform World to Pixel coordinates
         pixel_x = int((x + self.map_size_meters / 2) * self.resolution)
         pixel_y = int((y + self.map_size_meters / 2) * self.resolution)
 
-        # 2. Check Bounds
+        # Check Bounds
         if (pixel_x < 0 or pixel_x >= self.img_width or 
             pixel_y < 0 or pixel_y >= self.img_height):
-            return False # Out of map bounds
+            return False
 
-        # 3. Check Pixel Color
-        # We assume Free Space is White (approx 255) and Obstacles are Black (0)
-        # Using a threshold of 127 is safe.
+        # Check Pixel Color (White means free space)
         pixel_value = self.map_img[pixel_y, pixel_x]
         
-        return pixel_value > 127  # True if White (Safe), False if Black (Obstacle)
+        return pixel_value > 127
     
     def reset(self, random_goal: bool = True) -> np.ndarray:
         self.send_velocity(0.0, 0.0)
-
-        # Reset via Wrapper
         self.reset_world()
-
         self.goal_reached_flag = False
 
         if random_goal:
@@ -247,7 +218,6 @@ class TurtleBot3Env(Node):
         return self.get_state()
 
     def reset_world(self):
-        # Calls the wrapper service, NOT stage directly
         if not self.reset_stage_client.wait_for_service(timeout_sec=5.0):
             self.get_logger().warn('/reset_sim service not available')
             return
@@ -257,4 +227,5 @@ class TurtleBot3Env(Node):
         rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
 
     def get_state(self) -> np.ndarray:
+        # Implemented by the node using StateProcessor
         return None

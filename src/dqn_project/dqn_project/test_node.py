@@ -13,20 +13,13 @@ from dqn_project.environment import TurtleBot3Env
 from dqn_project.state_processor import StateProcessor
 
 class DQNTestNode(Node):
-    """
-    Node for evaluating a trained DQN agent with Live Debug Visualization.
-    Generates fully random goals within a safe operational range (8m).
-    """
-
     def __init__(self, model_path: str):
         super().__init__('dqn_test_node')
 
-        # --- Configuration ---
         self.state_size = 50        
         self.action_size = 5
         self.n_lidar_bins = 48      
         
-        # --- Agent Initialization ---
         self.agent = DQNAgent(self.state_size, self.action_size)
         try:
             self.agent.load(model_path)
@@ -35,18 +28,14 @@ class DQNTestNode(Node):
             self.get_logger().error(f"Failed to load model: {e}")
             sys.exit(1)
 
-        # Pequeña ayuda para salir de oscilaciones
         self.agent.epsilon = 0.05
 
-        # --- Environment & Processor ---
         self.env = TurtleBot3Env()
         self.state_processor = StateProcessor(n_lidar_bins=self.n_lidar_bins)
 
-        # --- VISUALIZATION SETUP ---
         self.init_debug_window()
 
     def init_debug_window(self):
-        """Sets up the live map visualization"""
         plt.ion() 
         self.debug_fig, self.debug_ax = plt.subplots(figsize=(6, 6))
         self.debug_fig.canvas.manager.set_window_title("Test Node - Range 8m Check")
@@ -73,7 +62,6 @@ class DQNTestNode(Node):
         if self.env.goal_position is None: return
         gx_rel, gy_rel = self.env.goal_position
 
-        # Offsets
         off_x = getattr(self.env, 'spawn_x', -7.0) 
         off_y = getattr(self.env, 'spawn_y', -6.5)
         
@@ -96,26 +84,16 @@ class DQNTestNode(Node):
         )
 
     def generate_constrained_random_goal(self):
-        """
-        Genera un objetivo aleatorio validado por el mapa, 
-        pero limita la distancia máxima a 8 metros para evitar misiones imposibles.
-        """
         valid = False
         attempts = 0
         
-        # Intentamos hasta 100 veces encontrar un punto válido
         while not valid and attempts < 100:
-            # 1. Distancia Aleatoria (2.0 a 8.0 metros)
-            # Esto es lo que cambia: limitamos el rango a algo razonable para DQN local.
             dist = np.random.uniform(2.0, 8.0) 
             angle = np.random.uniform(-np.pi, np.pi)
 
-            # 2. Coordenadas Relativas
             cand_rel_x = dist * np.cos(angle)
             cand_rel_y = dist * np.sin(angle)
 
-            # 3. Verificar Validez usando la función del entorno (Bitmap Check)
-            # Esto asegura que NO caiga en un punto negro
             world_x = cand_rel_x + self.env.spawn_x
             world_y = cand_rel_y + self.env.spawn_y
 
@@ -139,21 +117,16 @@ class DQNTestNode(Node):
         total_rewards = []
 
         for episode in range(n_episodes):
-            # 1. Reset básico (sin generar goal interno)
             self.env.reset(random_goal=False) 
-            
-            # 2. Generar nuestro objetivo aleatorio controlado (Max 8m)
             self.generate_constrained_random_goal()
-
             self.update_debug_window()
 
-            # Estabilizar
-            for _ in range(10): rclpy.spin_once(self.env, timeout_sec=0.05)
+            for _ in range(10): 
+                rclpy.spin_once(self.env, timeout_sec=0.05)
 
             state = self.get_processed_state()
             episode_reward = 0
             
-            # Damos 1000 pasos para asegurar que llegue a los 8 metros
             for step in range(1000):
                 action = self.agent.act(state, training=False)
                 _, reward, done = self.env.step(action)
